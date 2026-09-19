@@ -1,0 +1,277 @@
+package com.example.engine
+
+import android.content.Context
+import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
+import android.os.Environment
+import com.example.data.remote.DuckDuckGoSearchService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+class NovaDocumentGenerator(private val context: Context) {
+
+    private val searchService = DuckDuckGoSearchService(context)
+
+    private fun getOutputDirectory(): File {
+        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), "Nova")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    suspend fun generateDocx(
+        title: String,
+        content: String,
+        imageQuery: String? = null
+    ): File = withContext(Dispatchers.IO) {
+        val safeTitle = title.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(40)
+        val file = File(getOutputDirectory(), "${safeTitle}_${System.currentTimeMillis()}.docx")
+
+        var imageFile: File? = null
+        if (!imageQuery.isNullOrBlank()) {
+            imageFile = searchService.searchAndDownloadImage(imageQuery)
+        }
+
+        // Build a genuine valid OOXML .docx ZIP container
+        ZipOutputStream(FileOutputStream(file)).use { zip ->
+            // [Content_Types].xml
+            zip.putNextEntry(ZipEntry("[Content_Types].xml"))
+            val contentTypes = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="jpeg" ContentType="image/jpeg"/>
+  <Default Extension="jpg" ContentType="image/jpeg"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>""".trimIndent()
+            zip.write(contentTypes.toByteArray())
+            zip.closeEntry()
+
+            // _rels/.rels
+            zip.putNextEntry(ZipEntry("_rels/.rels"))
+            val rootRels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>""".trimIndent()
+            zip.write(rootRels.toByteArray())
+            zip.closeEntry()
+
+            // word/_rels/document.xml.rels
+            zip.putNextEntry(ZipEntry("word/_rels/document.xml.rels"))
+            val docRels = if (imageFile != null) {
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.jpg"/>
+</Relationships>"""
+            } else {
+                """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
+            }
+            zip.write(docRels.toByteArray())
+            zip.closeEntry()
+
+            // If image is present, include in word/media/image1.jpg
+            if (imageFile != null && imageFile.exists()) {
+                zip.putNextEntry(ZipEntry("word/media/image1.jpg"))
+                zip.write(imageFile.readBytes())
+                zip.closeEntry()
+            }
+
+            // word/document.xml
+            zip.putNextEntry(ZipEntry("word/document.xml"))
+            val paragraphsXml = StringBuilder()
+
+            // Title paragraph
+            paragraphsXml.append("""
+                <w:p>
+                    <w:pPr>
+                        <w:jc w:val="center"/>
+                    </w:pPr>
+                    <w:r>
+                        <w:rPr>
+                            <w:b/>
+                            <w:sz w:val="48"/>
+                            <w:color w:val="0077FE"/>
+                        </w:rPr>
+                        <w:t>${escapeXml(title)}</w:t>
+                    </w:r>
+                </w:p>
+            """.trimIndent())
+
+            // Subtitle metadata
+            paragraphsXml.append("""
+                <w:p>
+                    <w:pPr><w:jc w:val="center"/></w:pPr>
+                    <w:r>
+                        <w:rPr><w:i/><w:sz w:val="20"/><w:color w:val="777777"/></w:rPr>
+                        <w:t>Generated by Nova AI Assistant</w:t>
+                    </w:r>
+                </w:p>
+                <w:p><w:r><w:t></w:t></w:r></w:p>
+            """.trimIndent())
+
+            // Body paragraphs
+            content.split("\n").forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.isNotEmpty()) {
+                    paragraphsXml.append("""
+                        <w:p>
+                            <w:r>
+                                <w:rPr><w:sz w:val="24"/></w:rPr>
+                                <w:t>${escapeXml(trimmed)}</w:t>
+                            </w:r>
+                        </w:p>
+                    """.trimIndent())
+                }
+            }
+
+            val docXml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    $paragraphsXml
+    <w:sectPr>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>
+    </w:sectPr>
+  </w:body>
+</w:document>""".trimIndent()
+            zip.write(docXml.toByteArray())
+            zip.closeEntry()
+        }
+
+        return@withContext file
+    }
+
+    suspend fun generatePdf(
+        title: String,
+        content: String,
+        imageQuery: String? = null
+    ): File = withContext(Dispatchers.IO) {
+        val safeTitle = title.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(40)
+        val file = File(getOutputDirectory(), "${safeTitle}_${System.currentTimeMillis()}.pdf")
+
+        var imageFile: File? = null
+        if (!imageQuery.isNullOrBlank()) {
+            imageFile = searchService.searchAndDownloadImage(imageQuery)
+        }
+
+        val pdfDocument = PdfDocument()
+        val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create() // A4 size
+        val page = pdfDocument.startPage(pageInfo)
+        val canvas = page.canvas
+
+        var currentY = 50f
+        val marginX = 40f
+        val contentWidth = 595f - 80f
+
+        // Title
+        val titlePaint = Paint().apply {
+            color = Color.rgb(0, 119, 254)
+            textSize = 22f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            isAntiAlias = true
+        }
+        canvas.drawText(title, marginX, currentY, titlePaint)
+        currentY += 25f
+
+        // Subtitle
+        val subPaint = Paint().apply {
+            color = Color.GRAY
+            textSize = 10f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.ITALIC)
+            isAntiAlias = true
+        }
+        canvas.drawText("Generated by Nova AI Companion • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm").format(java.util.Date())}", marginX, currentY, subPaint)
+        currentY += 20f
+
+        // Divider
+        val linePaint = Paint().apply {
+            color = Color.LTGRAY
+            strokeWidth = 1f
+        }
+        canvas.drawLine(marginX, currentY, marginX + contentWidth, currentY, linePaint)
+        currentY += 25f
+
+        // Draw image if available
+        if (imageFile != null && imageFile.exists()) {
+            try {
+                val bitmap = BitmapFactory.decodeFile(imageFile.absolutePath)
+                if (bitmap != null) {
+                    val targetWidth = 320f
+                    val targetHeight = (bitmap.height.toFloat() / bitmap.width.toFloat()) * targetWidth
+                    val destRect = android.graphics.RectF(marginX, currentY, marginX + targetWidth, currentY + targetHeight)
+                    canvas.drawBitmap(bitmap, null, destRect, null)
+                    currentY += targetHeight + 20f
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // Body Text
+        val bodyPaint = Paint().apply {
+            color = Color.rgb(30, 30, 30)
+            textSize = 12f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+            isAntiAlias = true
+        }
+
+        val lines = content.split("\n")
+        for (line in lines) {
+            if (currentY > 800f) break
+            val words = line.split(" ")
+            var currentLine = ""
+            for (word in words) {
+                val testLine = if (currentLine.isEmpty()) word else "$currentLine $word"
+                val textWidth = bodyPaint.measureText(testLine)
+                if (textWidth > contentWidth) {
+                    canvas.drawText(currentLine, marginX, currentY, bodyPaint)
+                    currentY += 16f
+                    currentLine = word
+                } else {
+                    currentLine = testLine
+                }
+            }
+            if (currentLine.isNotEmpty()) {
+                canvas.drawText(currentLine, marginX, currentY, bodyPaint)
+                currentY += 18f
+            }
+        }
+
+        pdfDocument.finishPage(page)
+        FileOutputStream(file).use { pdfDocument.writeTo(it) }
+        pdfDocument.close()
+
+        return@withContext file
+    }
+
+    suspend fun generateCodeOrTextFile(
+        title: String,
+        content: String,
+        extension: String // "py", "js", "html", "txt", "kt"
+    ): File = withContext(Dispatchers.IO) {
+        val safeTitle = title.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(40)
+        val file = File(getOutputDirectory(), "${safeTitle}_${System.currentTimeMillis()}.$extension")
+        file.writeText(content)
+        return@withContext file
+    }
+
+    private fun escapeXml(input: String): String {
+        return input.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&apos;")
+    }
+}

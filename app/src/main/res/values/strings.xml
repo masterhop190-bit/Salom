@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Nova AI Assistant</string>
+    <string name="accessibility_service_description">Nova AI Assistant uses accessibility capabilities to perform requested voice actions, navigate apps, tap buttons, and read screen context autonomously.</string>
+    <string name="notification_channel_name">Nova Background Engine</string>
+    <string name="notification_channel_desc">Keeps Nova AI active for hands-free wake word detection and floating overlay controls.</string>
+</resources>

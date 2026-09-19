@@ -1,0 +1,6 @@
+{
+  "name": "Nova AI Assistant",
+  "description": "Jarvis-like Personal AI Companion with autonomous GUI automation, real-time screen awareness, voice conversation, and intelligent file generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
